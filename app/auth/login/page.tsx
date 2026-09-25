@@ -1,0 +1,118 @@
+'use client';
+
+import { useState } from 'react';
+import { useRouter } from 'next/navigation';
+import Link from 'next/link';
+import { useForm } from 'react-hook-form';
+import { zodResolver } from '@hookform/resolvers/zod';
+import { z } from 'zod';
+import { Button } from '@/components/ui/button';
+import { Input } from '@/components/ui/input';
+import { Card, CardHeader, CardTitle, CardDescription, CardContent } from '@/components/ui/card';
+import { authService } from '@/services/auth.service';
+import { useAuthStore } from '@/stores/auth.store';
+import { toast } from 'sonner';
+import { ROUTES } from '@/lib/config';
+
+const loginSchema = z.object({
+  email: z.string().email('Invalid email address'),
+  password: z.string().min(6, 'Password must be at least 6 characters'),
+});
+
+type LoginForm = z.infer<typeof loginSchema>;
+
+export default function LoginPage() {
+  const router = useRouter();
+  const { setUser } = useAuthStore();
+  const [isLoading, setIsLoading] = useState(false);
+
+  const {
+    register,
+    handleSubmit,
+    formState: { errors },
+  } = useForm<LoginForm>({
+    resolver: zodResolver(loginSchema),
+  });
+
+  const onSubmit = async (data: LoginForm) => {
+    setIsLoading(true);
+    try {
+      const response = await authService.login(data);
+      if (response.data) {
+        setUser(response.data.user);
+        toast.success('Welcome back!');
+        router.push(ROUTES.HOME);
+      }
+    } catch (error: any) {
+      toast.error(error.message || 'Login failed');
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  return (
+    <div className="flex min-h-screen items-center justify-center bg-background px-4">
+      <Card className="w-full max-w-md">
+        <CardHeader className="text-center">
+          <div className="mx-auto mb-4 flex h-12 w-12 items-center justify-center rounded-lg bg-primary">
+            <span className="text-2xl font-bold text-primary-foreground">C</span>
+          </div>
+          <CardTitle className="text-2xl">Welcome Back</CardTitle>
+          <CardDescription>Sign in to Coding World Connect</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <form onSubmit={handleSubmit(onSubmit)} className="space-y-4">
+            <div className="space-y-2">
+              <label htmlFor="email" className="text-sm font-medium">
+                Email
+              </label>
+              <Input
+                id="email"
+                type="email"
+                placeholder="you@example.com"
+                {...register('email')}
+              />
+              {errors.email && (
+                <p className="text-sm text-destructive">{errors.email.message}</p>
+              )}
+            </div>
+
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <label htmlFor="password" className="text-sm font-medium">
+                  Password
+                </label>
+                <Link
+                  href={ROUTES.FORGOT_PASSWORD}
+                  className="text-sm text-primary hover:underline"
+                >
+                  Forgot password?
+                </Link>
+              </div>
+              <Input
+                id="password"
+                type="password"
+                placeholder="••••••••"
+                {...register('password')}
+              />
+              {errors.password && (
+                <p className="text-sm text-destructive">{errors.password.message}</p>
+              )}
+            </div>
+
+            <Button type="submit" className="w-full" disabled={isLoading}>
+              {isLoading ? 'Signing in...' : 'Sign in'}
+            </Button>
+
+            <p className="text-center text-sm text-muted-foreground">
+              Don&apos;t have an account?{' '}
+              <Link href={ROUTES.REGISTER} className="text-primary hover:underline">
+                Sign up
+              </Link>
+            </p>
+          </form>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
