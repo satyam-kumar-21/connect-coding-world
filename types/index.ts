@@ -1,3 +1,6 @@
+export type DeveloperLevel = 'BEGINNER' | 'JUNIOR' | 'MID' | 'SENIOR' | 'LEAD' | 'PRINCIPAL' | 'ARCHITECT';
+export type AvailabilityStatus = 'AVAILABLE' | 'BUSY' | 'DO_NOT_DISTURB' | 'AWAY' | 'OFFLINE';
+
 export interface User {
   id: string;
   name: string;
@@ -11,7 +14,10 @@ export interface User {
   github?: string;
   linkedin?: string;
   twitter?: string;
-  role: 'USER' | 'ADMIN' | 'MODERATOR';
+  role: 'USER' | 'ADMIN' | 'MODERATOR' | 'STUDENT' | 'INSTRUCTOR';
+  developerLevel?: DeveloperLevel;
+  currentRole?: string;
+  company?: string;
   xp: number;
   rank: number;
   streak: number;
@@ -21,6 +27,10 @@ export interface User {
   interests: string[];
   isAvailableForConnection: boolean;
   isOnline: boolean;
+  isLive?: boolean;
+  currentActivity?: string;
+  codingLanguage?: string;
+  liveNote?: string;
   lastSeen?: string;
   createdAt: string;
 }
@@ -32,6 +42,7 @@ export interface Post {
   author: User;
   media?: string[];
   visibility: 'PUBLIC' | 'CONNECTIONS' | 'PRIVATE';
+  tags?: string[];
   reactionCount: number;
   commentCount: number;
   shareCount: number;
@@ -70,6 +81,7 @@ export interface Connection {
   addresseeId: string;
   addressee: User;
   status: 'PENDING' | 'ACCEPTED' | 'REJECTED' | 'BLOCKED';
+  message?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -79,9 +91,10 @@ export interface Problem {
   title: string;
   slug: string;
   description: string;
-  difficulty: 'EASY' | 'MEDIUM' | 'HARD';
+  difficulty: 'EASY' | 'MEDIUM' | 'HARD' | 'EXPERT';
   category: string;
   tags: string[];
+  type?: 'CODING' | 'MCQ' | 'DEBUGGING' | 'OUTPUT_PREDICTION' | 'SQL' | 'SYSTEM_DESIGN';
   constraints?: string;
   examples?: string;
   starterCode?: Record<string, string>;
@@ -90,24 +103,27 @@ export interface Problem {
   acceptanceRate: number;
   totalSubmissions: number;
   isSolved?: boolean;
+  editorial?: string;
   createdAt: string;
 }
 
 export interface Submission {
   id: string;
   problemId: string;
-  problem: Problem;
+  problem?: Problem;
+  problemTitle?: string;
   userId: string;
-  user: User;
+  user?: User;
   language: string;
-  code: string;
-  status: 'ACCEPTED' | 'WRONG_ANSWER' | 'RUNTIME_ERROR' | 'COMPILATION_ERROR' | 'TIME_LIMIT' | 'MEMORY_LIMIT' | 'PENDING';
+  code?: string;
+  status: 'ACCEPTED' | 'WRONG_ANSWER' | 'RUNTIME_ERROR' | 'COMPILATION_ERROR' | 'TIME_LIMIT_EXCEEDED' | 'MEMORY_LIMIT_EXCEEDED' | 'PENDING';
   runtime?: number;
   memory?: number;
   score?: number;
   testCasesPassed?: number;
   totalTestCases?: number;
   error?: string;
+  xpEarned?: number;
   createdAt: string;
 }
 
@@ -120,8 +136,10 @@ export interface Message {
   conversationId?: string;
   roomId?: string;
   content: string;
-  type: 'TEXT' | 'IMAGE' | 'FILE' | 'SYSTEM';
+  type: 'TEXT' | 'IMAGE' | 'FILE' | 'SYSTEM' | 'CODE';
   media?: string;
+  codeLanguage?: string;
+  replyToId?: string;
   isRead: boolean;
   isEdited: boolean;
   createdAt: string;
@@ -130,6 +148,8 @@ export interface Message {
 
 export interface Conversation {
   id: string;
+  name?: string;
+  type?: 'DIRECT' | 'GROUP' | 'ROOM';
   participants: User[];
   lastMessage?: Message;
   unreadCount: number;
@@ -140,11 +160,30 @@ export interface Conversation {
 export interface Notification {
   id: string;
   userId: string;
-  type: 'CONNECTION_REQUEST' | 'CONNECTION_ACCEPTED' | 'POST_REACTION' | 'COMMENT' | 'REPLY' | 'ACHIEVEMENT' | 'MESSAGE' | 'COLLABORATION_REQUEST' | 'COURSE_ENROLLMENT' | 'PAYMENT';
+  type:
+    | 'CONNECTION_REQUEST'
+    | 'CONNECTION_ACCEPTED'
+    | 'POST_REACTION'
+    | 'POST_COMMENT'
+    | 'COMMENT'
+    | 'REPLY'
+    | 'ACHIEVEMENT'
+    | 'ACHIEVEMENT_UNLOCKED'
+    | 'BADGE_EARNED'
+    | 'CODING_CHALLENGE'
+    | 'MESSAGE'
+    | 'MESSAGE_RECEIVED'
+    | 'COLLABORATION_REQUEST'
+    | 'COLLABORATION_ACCEPTED'
+    | 'COURSE_ENROLLMENT'
+    | 'SYSTEM';
   title: string;
   message: string;
   link?: string;
   isRead: boolean;
+  sender?: User;
+  entityType?: string;
+  entityId?: string;
   metadata?: Record<string, any>;
   createdAt: string;
 }
@@ -157,6 +196,9 @@ export interface Achievement {
   category: string;
   xpReward: number;
   earnedAt?: string;
+  isUnlocked?: boolean;
+  progress?: number;
+  maxProgress?: number;
 }
 
 export interface LeaderboardEntry {
@@ -166,16 +208,56 @@ export interface LeaderboardEntry {
   problemsSolved: number;
   streak: number;
   acceptanceRate: number;
+  weeklyXp?: number;
+  monthlyXp?: number;
+  level?: number;
+  levelTitle?: string;
+  badges?: string[];
 }
 
 export interface CollaborationSession {
   id: string;
+  title: string;
+  description?: string;
+  roomCode: string;
+  initiator: User;
   participants: User[];
-  status: 'PENDING' | 'ACTIVE' | 'COMPLETED' | 'CANCELLED';
+  status: 'PENDING' | 'REQUESTED' | 'ACCEPTED' | 'ACTIVE' | 'ENDED' | 'CANCELLED';
+  codingLanguage?: string;
+  currentActivity?: string;
   problemId?: string;
   problem?: Problem;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface SavedItem {
+  id: string;
+  type: 'PROBLEM' | 'POST' | 'SNIPPET' | 'DEVELOPER';
+  title: string;
+  description?: string;
+  category?: string;
+  tags?: string[];
+  link: string;
+  problem?: Problem;
+  post?: Post;
+  user?: User;
+  codeSnippet?: {
+    language: string;
+    code: string;
+  };
+  savedAt: string;
+}
+
+export interface ActivityFeedItem {
+  id: string;
+  type: 'SUBMISSION' | 'ACHIEVEMENT' | 'STREAK' | 'POST' | 'COLLABORATION' | 'CONNECTION';
+  title: string;
+  description: string;
+  timestamp: string;
+  xpEarned?: number;
+  status?: string;
+  metadata?: Record<string, any>;
 }
 
 export interface ApiResponse<T = any> {

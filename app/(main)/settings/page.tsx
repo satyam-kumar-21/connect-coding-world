@@ -17,11 +17,12 @@ export default function SettingsPage() {
 
   return (
     <MainLayout>
-      <div className="container max-w-4xl py-6 space-y-6">
-        <div>
-          <h1 className="text-3xl font-bold">Settings</h1>
-          <p className="text-muted-foreground mt-2">Manage your account settings and preferences</p>
-        </div>
+      <div className="w-full py-8">
+        <div className="max-w-[1200px] mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
+          <div>
+            <h1 className="text-3xl font-extrabold tracking-tight">Settings &amp; Preferences</h1>
+            <p className="text-muted-foreground mt-1">Manage your developer account, live privacy, and platform notifications</p>
+          </div>
 
         <Tabs defaultValue="account">
           <TabsList>
@@ -202,6 +203,7 @@ export default function SettingsPage() {
             </Card>
           </TabsContent>
         </Tabs>
+        </div>
       </div>
     </MainLayout>
   );
