@@ -33,6 +33,10 @@ import {
   Smile,
   Shield,
   MessageSquare,
+  Plus,
+  Minus,
+  LocateFixed,
+  Home,
 } from 'lucide-react';
 import { MainLayout } from '@/components/layout/main-layout';
 import { Card } from '@/components/ui/card';
@@ -50,6 +54,21 @@ import { toast } from 'sonner';
 // ============================================================
 const WORLD_WIDTH = 3200;
 const WORLD_HEIGHT = 2400;
+
+// Zoom settings. zoom = 1 is the ORIGINAL default view.
+const DEFAULT_ZOOM = 1;
+const MAX_ZOOM = 4;
+const ZOOM_STEP = 1.35;
+// Decorative scale: how many "km" one world pixel represents (used by scale bar / altitude)
+const KM_PER_UNIT = 12.5;
+
+const formatWorldCoordinates = (x: number, y: number) => {
+  const longitude = (x / WORLD_WIDTH) * 360 - 180;
+  const latitude = 60 - (y / WORLD_HEIGHT) * 120;
+  const latitudeLabel = `${Math.abs(latitude).toFixed(2)}°${latitude >= 0 ? 'N' : 'S'}`;
+  const longitudeLabel = `${Math.abs(longitude).toFixed(2)}°${longitude >= 0 ? 'E' : 'W'}`;
+  return `${latitudeLabel}  ${longitudeLabel}`;
+};
 
 interface WorldUser {
   id: string;
@@ -85,6 +104,15 @@ interface Landmark {
   description: string;
   badge: string;
 }
+
+// Place labels shown like Google Earth when zoomed out
+const REGION_LABELS = [
+  { text: 'ALGORITHM RANGE', x: 1000, y: 600 },
+  { text: 'CENTRAL PLAINS', x: 1950, y: 880 },
+  { text: 'DEV LAKE', x: 1900, y: 2100 },
+  { text: 'WESTERN WOODS', x: 560, y: 1650 },
+  { text: 'DEV OCEAN', x: 1600, y: -140 },
+];
 
 const LANDMARKS: Landmark[] = [
   {
@@ -173,6 +201,22 @@ export default function VirtualWorldPage() {
   const [playerColor, setPlayerColor] = useState('#8b5cf6'); // Cyber Purple
   const [playerSpeech, setPlayerSpeech] = useState<string | null>(null);
   const [chatInput, setChatInput] = useState('');
+
+  // ------------------------------------------------------------
+  // CAMERA / ZOOM STATE (refs so the render loop never re-subscribes)
+  // ------------------------------------------------------------
+  const cameraRef = useRef({ x: 1500, y: 1250, follow: true });
+  const zoomRef = useRef(DEFAULT_ZOOM); // current (animated) zoom
+  const zoomTargetRef = useRef(DEFAULT_ZOOM); // where zoom is heading
+  const zoomAnchorRef = useRef<{ sx: number; sy: number; wx: number; wy: number } | null>(null);
+  const pointersRef = useRef(new Map<number, { x: number; y: number }>());
+  const dragRef = useRef<{ sx: number; sy: number; camX: number; camY: number; moved: boolean } | null>(null);
+  const pinchRef = useRef<{ dist: number; zoom: number } | null>(null);
+
+  // UI mirrors of the camera state
+  const [zoomLevel, setZoomLevel] = useState(DEFAULT_ZOOM);
+  const [isFollowing, setIsFollowing] = useState(true);
+  const [cursorCoords, setCursorCoords] = useState('');
 
   // Other online developers in the world
   const [worldDevs, setWorldDevs] = useState<WorldUser[]>([
@@ -289,6 +333,80 @@ export default function VirtualWorldPage() {
   // Keystroke tracker
   const keysPressed = useRef<Record<string, boolean>>({});
 
+  // ============================================================
+  // ZOOM HELPERS
+  // ============================================================
+  // Zoom level at which the entire world just fits in the viewport
+  const getFitZoom = useCallback(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return 0.3;
+    return Math.min(canvas.width / WORLD_WIDTH, canvas.height / WORLD_HEIGHT);
+  }, []);
+
+  // Allow zooming out slightly past "fit" so the world floats in space like Google Earth
+  const clampZoom = useCallback(
+    (z: number) => Math.max(getFitZoom() * 0.8, Math.min(MAX_ZOOM, z)),
+    [getFitZoom]
+  );
+
+  /**
+   * Set a new zoom target.
+   * - anchor given + free camera  -> zoom toward that screen point (like Google Maps wheel zoom)
+   * - otherwise                   -> zoom around the screen center (keeps the player centered)
+   */
+  const setZoom = useCallback(
+    (target: number, anchor?: { sx: number; sy: number }) => {
+      const t = clampZoom(target);
+      zoomTargetRef.current = t;
+      setZoomLevel(t);
+
+      const cam = cameraRef.current;
+      const canvas = canvasRef.current;
+      if (anchor && !cam.follow && canvas) {
+        const z = zoomRef.current;
+        zoomAnchorRef.current = {
+          sx: anchor.sx,
+          sy: anchor.sy,
+          wx: cam.x + (anchor.sx - canvas.width / 2) / z,
+          wy: cam.y + (anchor.sy - canvas.height / 2) / z,
+        };
+      } else {
+        zoomAnchorRef.current = null;
+      }
+    },
+    [clampZoom]
+  );
+
+  const zoomBy = useCallback(
+    (factor: number, anchor?: { sx: number; sy: number }) => {
+      setZoom(zoomTargetRef.current * factor, anchor);
+    },
+    [setZoom]
+  );
+
+  // Back to the original default view: zoom 100%, following the player
+  const handleResetView = useCallback(() => {
+    cameraRef.current.follow = true;
+    setIsFollowing(true);
+    setZoom(DEFAULT_ZOOM);
+  }, [setZoom]);
+
+  // Google Earth style "see the whole planet"
+  const handleFitWorld = useCallback(() => {
+    const cam = cameraRef.current;
+    cam.follow = false;
+    cam.x = WORLD_WIDTH / 2;
+    cam.y = WORLD_HEIGHT / 2;
+    setIsFollowing(false);
+    setZoom(getFitZoom() * 0.92);
+  }, [getFitZoom, setZoom]);
+
+  // Snap the camera back onto the player without changing zoom
+  const handleRecenter = useCallback(() => {
+    cameraRef.current.follow = true;
+    setIsFollowing(true);
+  }, []);
+
   // Keyboard Event Handlers
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -299,6 +417,15 @@ export default function VirtualWorldPage() {
 
       keysPressed.current[e.key.toLowerCase()] = true;
       keysPressed.current[e.code] = true;
+
+      // Zoom shortcuts: + / - / 0
+      if (e.key === '+' || e.key === '=') {
+        zoomBy(ZOOM_STEP);
+      } else if (e.key === '-' || e.key === '_') {
+        zoomBy(1 / ZOOM_STEP);
+      } else if (e.key === '0') {
+        handleResetView();
+      }
 
       // Interaction shortcut: E
       if (e.key.toLowerCase() === 'e' && nearbyDev) {
@@ -326,7 +453,26 @@ export default function VirtualWorldPage() {
       window.removeEventListener('keydown', handleKeyDown);
       window.removeEventListener('keyup', handleKeyUp);
     };
-  }, [nearbyDev]);
+  }, [nearbyDev, zoomBy, handleResetView]);
+
+  // Mouse wheel / trackpad pinch zoom (must be a non-passive listener to stop page scroll)
+  useEffect(() => {
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = canvas.getBoundingClientRect();
+      const factor = Math.exp(-e.deltaY * 0.0015);
+      setZoom(zoomTargetRef.current * factor, {
+        sx: e.clientX - rect.left,
+        sy: e.clientY - rect.top,
+      });
+    };
+
+    canvas.addEventListener('wheel', onWheel, { passive: false });
+    return () => canvas.removeEventListener('wheel', onWheel);
+  }, [setZoom]);
 
   // Game Loop: Movement & Animation
   useEffect(() => {
@@ -363,6 +509,12 @@ export default function VirtualWorldPage() {
       setIsPlayerMoving(isMovingNow);
 
       if (isMovingNow) {
+        // Moving your character snaps the camera back to you
+        if (!cameraRef.current.follow) {
+          cameraRef.current.follow = true;
+          setIsFollowing(true);
+        }
+
         if (frameCount % 6 === 0) {
           setPlayerWalkFrame((prev) => (prev + 1) % 4);
         }
@@ -428,113 +580,316 @@ export default function VirtualWorldPage() {
 
     const width = canvas.width;
     const height = canvas.height;
+    const zoom = zoomRef.current;
 
-    // Camera offset to center on player
-    const cameraX = playerX - width / 2;
-    const cameraY = playerY - height / 2;
+    // Camera: smoothly follow the player, or stay where the user dragged it
+    const cam = cameraRef.current;
+    if (cam.follow) {
+      const fx = playerX - cam.x;
+      const fy = playerY - cam.y;
+      if (Math.abs(fx) < 0.5 && Math.abs(fy) < 0.5) {
+        cam.x = playerX;
+        cam.y = playerY;
+      } else {
+        cam.x += fx * 0.3;
+        cam.y += fy * 0.3;
+      }
+    }
+
+    // Level-of-detail helpers
+    const labelScale = Math.min(3.2, Math.max(1, 0.85 / zoom)); // keeps labels readable when zoomed out
+    const showPins = zoom < 0.45;
 
     ctx.save();
-    // Clear canvas
-    ctx.fillStyle = '#090d16'; // Deep space night background
+    // Clear canvas: deep space
+    ctx.fillStyle = '#04070f';
     ctx.fillRect(0, 0, width, height);
 
-    ctx.translate(-cameraX, -cameraY);
+    // Star field (screen space, deterministic)
+    for (let i = 0; i < 150; i++) {
+      const r1 = Math.abs(Math.sin(i * 127.1) * 43758.5453) % 1;
+      const r2 = Math.abs(Math.sin(i * 311.7) * 12543.13) % 1;
+      const r3 = Math.abs(Math.sin(i * 74.7) * 9631.77) % 1;
+      ctx.fillStyle = `rgba(255, 255, 255, ${0.25 + r3 * 0.6})`;
+      ctx.beginPath();
+      ctx.arc(r1 * width, r2 * height, 0.4 + r3 * 1.1, 0, Math.PI * 2);
+      ctx.fill();
+    }
 
-    // 1. Draw World Terrain (Grass, Plains & Biomes)
-    // Base grass
-    ctx.fillStyle = '#0f172a';
-    ctx.fillRect(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    // World transform: center on camera, apply zoom
+    ctx.translate(width / 2, height / 2);
+    ctx.scale(zoom, zoom);
+    ctx.translate(-cam.x, -cam.y);
 
-    // Grid pattern
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.03)';
-    ctx.lineWidth = 1;
-    for (let x = 0; x < WORLD_WIDTH; x += 80) {
+    // 1. Ocean "planet" with atmosphere glow, coastline, and island terrain
+    const OCEAN_MARGIN = 300;
+    const oceanPath = () => {
+      ctx.beginPath();
+      ctx.roundRect(
+        -OCEAN_MARGIN,
+        -OCEAN_MARGIN,
+        WORLD_WIDTH + OCEAN_MARGIN * 2,
+        WORLD_HEIGHT + OCEAN_MARGIN * 2,
+        260
+      );
+    };
+
+    const oceanGrad = ctx.createLinearGradient(0, 0, WORLD_WIDTH, WORLD_HEIGHT);
+    oceanGrad.addColorStop(0, '#315d66');
+    oceanGrad.addColorStop(0.55, '#244b5a');
+    oceanGrad.addColorStop(1, '#183b4c');
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(96, 165, 250, 0.55)'; // atmosphere
+    ctx.shadowBlur = 70;
+    oceanPath();
+    ctx.fillStyle = oceanGrad;
+    ctx.fill();
+    ctx.restore();
+
+    oceanPath();
+    ctx.strokeStyle = 'rgba(147, 197, 253, 0.35)';
+    ctx.lineWidth = 3 / zoom;
+    ctx.stroke();
+
+    const islandPath = () => {
+      ctx.beginPath();
+      ctx.moveTo(740, 100);
+      ctx.bezierCurveTo(980, 35, 1240, 130, 1480, 75);
+      ctx.bezierCurveTo(1770, 10, 1980, 145, 2210, 95);
+      ctx.bezierCurveTo(2510, 30, 2740, 190, 2990, 280);
+      ctx.bezierCurveTo(3160, 420, 3060, 650, 3130, 840);
+      ctx.bezierCurveTo(3220, 1120, 3060, 1320, 3120, 1540);
+      ctx.bezierCurveTo(3160, 1810, 2940, 1970, 2800, 2180);
+      ctx.bezierCurveTo(2570, 2390, 2310, 2260, 2090, 2330);
+      ctx.bezierCurveTo(1820, 2420, 1600, 2270, 1370, 2320);
+      ctx.bezierCurveTo(1080, 2380, 850, 2210, 610, 2180);
+      ctx.bezierCurveTo(340, 2110, 170, 1930, 120, 1690);
+      ctx.bezierCurveTo(50, 1420, 210, 1210, 120, 990);
+      ctx.bezierCurveTo(35, 740, 210, 570, 260, 380);
+      ctx.bezierCurveTo(350, 190, 540, 170, 740, 100);
+      ctx.closePath();
+    };
+
+    ctx.save();
+    ctx.shadowColor = 'rgba(7, 26, 32, 0.55)';
+    ctx.shadowBlur = 42;
+    ctx.shadowOffsetY = 20;
+    islandPath();
+    ctx.fillStyle = '#b7aa79';
+    ctx.fill();
+    ctx.restore();
+
+    // Shallow-water halo around the coast
+    ctx.lineJoin = 'round';
+    islandPath();
+    ctx.strokeStyle = 'rgba(120, 200, 200, 0.16)';
+    ctx.lineWidth = 90;
+    ctx.stroke();
+    islandPath();
+    ctx.strokeStyle = 'rgba(160, 225, 215, 0.24)';
+    ctx.lineWidth = 42;
+    ctx.stroke();
+    islandPath();
+    ctx.strokeStyle = 'rgba(235, 250, 245, 0.35)';
+    ctx.lineWidth = 8;
+    ctx.stroke();
+
+    islandPath();
+    const landGrad = ctx.createLinearGradient(300, 100, 2700, 2300);
+    landGrad.addColorStop(0, '#829b70');
+    landGrad.addColorStop(0.48, '#91a478');
+    landGrad.addColorStop(1, '#6f8d70');
+    ctx.fillStyle = landGrad;
+    ctx.fill();
+    ctx.save();
+    islandPath();
+    ctx.clip();
+
+    // Broad, softly blended biomes
+    [
+      [850, 620, 620, 430, 'rgba(91, 121, 83, 0.34)'],
+      [2250, 760, 620, 480, 'rgba(194, 172, 112, 0.25)'],
+      [1050, 1770, 720, 420, 'rgba(121, 151, 104, 0.35)'],
+      [2450, 1840, 520, 360, 'rgba(167, 166, 111, 0.28)'],
+    ].forEach(([x, y, radiusX, radiusY, color]) => {
+      const biome = ctx.createRadialGradient(Number(x), Number(y), 20, Number(x), Number(y), Number(radiusX));
+      biome.addColorStop(0, String(color));
+      biome.addColorStop(1, 'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = biome;
+      ctx.beginPath();
+      ctx.ellipse(Number(x), Number(y), Number(radiusX), Number(radiusY), 0, 0, Math.PI * 2);
+      ctx.fill();
+    });
+
+    // Geographic graticule, with curved meridians
+    ctx.strokeStyle = 'rgba(247, 244, 220, 0.18)';
+    ctx.lineWidth = 1.5;
+    for (let x = 400; x < WORLD_WIDTH; x += 400) {
       ctx.beginPath();
       ctx.moveTo(x, 0);
-      ctx.lineTo(x, WORLD_HEIGHT);
+      ctx.bezierCurveTo(x - 110, 800, x + 110, 1600, x, WORLD_HEIGHT);
       ctx.stroke();
     }
-    for (let y = 0; y < WORLD_HEIGHT; y += 80) {
+    for (let y = 400; y < WORLD_HEIGHT; y += 400) {
       ctx.beginPath();
       ctx.moveTo(0, y);
-      ctx.lineTo(WORLD_WIDTH, y);
+      ctx.bezierCurveTo(1000, y - 55, 2200, y + 55, WORLD_WIDTH, y);
       ctx.stroke();
     }
 
-    // 2. Mountains (North Biome: x: 400-1400, y: 0-600)
-    const mountainGrad = ctx.createLinearGradient(0, 0, 0, 700);
-    mountainGrad.addColorStop(0, '#334155');
-    mountainGrad.addColorStop(1, '#1e293b');
+    // Forest clusters: consistent placement keeps the animated map stable
+    for (let index = 0; index < 170; index += 1) {
+      const x = 300 + ((index * 197) % 2600);
+      const y = 250 + ((index * 313) % 1850);
+      const forestZone = (x < 1380 && y < 1030) || (x > 2050 && y < 950) || (x < 1450 && y > 1450);
+      if (!forestZone) continue;
+      const size = 9 + (index % 11);
+      ctx.fillStyle = index % 3 === 0 ? 'rgba(48, 85, 61, 0.52)' : 'rgba(58, 96, 65, 0.4)';
+      ctx.beginPath();
+      ctx.arc(x, y, size, 0, Math.PI * 2);
+      ctx.arc(x + size * 0.9, y + 3, size * 0.72, 0, Math.PI * 2);
+      ctx.fill();
+    }
+
+    // Extra ground detail that fades in when you zoom close (like satellite imagery loading)
+    if (zoom > 1.3) {
+      for (let index = 0; index < 380; index += 1) {
+        const x = 280 + ((index * 131) % 2650);
+        const y = 220 + ((index * 257) % 1900);
+        const forestZone = (x < 1380 && y < 1030) || (x > 2050 && y < 950) || (x < 1450 && y > 1450);
+        if (!forestZone) continue;
+        const size = 4 + (index % 6);
+        ctx.fillStyle = index % 2 === 0 ? 'rgba(38, 72, 50, 0.55)' : 'rgba(70, 108, 72, 0.45)';
+        ctx.beginPath();
+        ctx.arc(x, y, size, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.12)';
+        ctx.beginPath();
+        ctx.ellipse(x + size * 0.5, y + size * 0.7, size * 0.9, size * 0.4, 0, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    // North mountain range with layered ridges and snowcaps
+    const mountainGrad = ctx.createLinearGradient(0, 100, 0, 760);
+    mountainGrad.addColorStop(0, '#667777');
+    mountainGrad.addColorStop(1, '#73846e');
     ctx.fillStyle = mountainGrad;
     ctx.beginPath();
-    ctx.moveTo(300, 700);
-    ctx.lineTo(550, 200);
-    ctx.lineTo(750, 400);
-    ctx.lineTo(1000, 150);
-    ctx.lineTo(1250, 450);
+    ctx.moveTo(320, 740);
+    ctx.lineTo(560, 190);
+    ctx.lineTo(760, 420);
+    ctx.lineTo(1010, 130);
+    ctx.lineTo(1260, 430);
     ctx.lineTo(1450, 250);
-    ctx.lineTo(1700, 700);
+    ctx.lineTo(1710, 740);
     ctx.closePath();
     ctx.fill();
-
-    // Mountain snowy peaks
-    ctx.fillStyle = 'rgba(241, 245, 249, 0.85)';
+    ctx.strokeStyle = 'rgba(225, 226, 205, 0.4)';
+    ctx.lineWidth = 3;
     ctx.beginPath();
-    ctx.moveTo(550, 200);
-    ctx.lineTo(500, 270);
-    ctx.lineTo(600, 270);
-    ctx.closePath();
-    ctx.fill();
+    ctx.moveTo(410, 650);
+    ctx.lineTo(560, 190);
+    ctx.lineTo(690, 445);
+    ctx.lineTo(1010, 130);
+    ctx.lineTo(1195, 465);
+    ctx.lineTo(1450, 250);
+    ctx.lineTo(1640, 650);
+    ctx.stroke();
+    ctx.fillStyle = 'rgba(239, 239, 222, 0.88)';
+    [[560, 190, 58], [1010, 130, 72], [1450, 250, 54]].forEach(([peakX, peakY, peakWidth]) => {
+      ctx.beginPath();
+      ctx.moveTo(peakX - peakWidth, peakY + peakWidth * 1.25);
+      ctx.lineTo(peakX, peakY);
+      ctx.lineTo(peakX + peakWidth, peakY + peakWidth * 1.25);
+      ctx.lineTo(peakX + peakWidth * 0.4, peakY + peakWidth);
+      ctx.lineTo(peakX, peakY + peakWidth * 1.12);
+      ctx.lineTo(peakX - peakWidth * 0.45, peakY + peakWidth * 0.92);
+      ctx.closePath();
+      ctx.fill();
+    });
 
-    ctx.beginPath();
-    ctx.moveTo(1000, 150);
-    ctx.lineTo(940, 230);
-    ctx.lineTo(1060, 230);
-    ctx.closePath();
-    ctx.fill();
-
-    // 3. River & Southern Lake (x: 1200-2400, y: 1800-2400)
-    const riverGrad = ctx.createLinearGradient(1200, 1800, 2400, 2400);
-    riverGrad.addColorStop(0, '#0284c7');
-    riverGrad.addColorStop(1, '#0369a1');
-    ctx.fillStyle = riverGrad;
+    // Southern freshwater lake and winding river
+    const lakeGrad = ctx.createLinearGradient(1500, 1830, 2300, 2220);
+    lakeGrad.addColorStop(0, '#5ba5a5');
+    lakeGrad.addColorStop(1, '#397e8b');
+    ctx.fillStyle = lakeGrad;
     ctx.beginPath();
     ctx.ellipse(1900, 2100, 480, 220, -0.15, 0, Math.PI * 2);
     ctx.fill();
-
-    // Water ripple rings
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.2)';
-    ctx.lineWidth = 1.5;
-    ctx.beginPath();
-    ctx.ellipse(1900, 2100, 450, 200, -0.15, 0, Math.PI * 2);
-    ctx.stroke();
-
-    // 4. Paved Roads & Highways
-    ctx.fillStyle = '#1e293b';
-    // Main horizontal highway (y: 1100 to 1240)
-    ctx.fillRect(200, 1150, WORLD_WIDTH - 400, 90);
-    // Vertical avenue (x: 1450 to 1550)
-    ctx.fillRect(1455, 300, 90, 1750);
-    // North access road to mountains
-    ctx.fillRect(750, 600, 80, 600);
-
-    // Road dashed yellow lane markings
-    ctx.strokeStyle = '#eab308';
+    ctx.strokeStyle = 'rgba(220, 238, 220, 0.48)';
     ctx.lineWidth = 3;
-    ctx.setLineDash([20, 20]);
     ctx.beginPath();
-    ctx.moveTo(200, 1195);
-    ctx.lineTo(WORLD_WIDTH - 200, 1195);
+    ctx.ellipse(1900, 2100, 450, 198, -0.15, 0, Math.PI * 2);
     ctx.stroke();
-
+    ctx.strokeStyle = 'rgba(75, 145, 146, 0.85)';
+    ctx.lineWidth = 38;
+    ctx.lineCap = 'round';
     ctx.beginPath();
-    ctx.moveTo(1500, 300);
-    ctx.lineTo(1500, 2050);
+    ctx.moveTo(1160, 670);
+    ctx.bezierCurveTo(1370, 900, 1160, 1120, 1450, 1330);
+    ctx.bezierCurveTo(1690, 1510, 1470, 1720, 1760, 1930);
     ctx.stroke();
-    ctx.setLineDash([]); // Reset dash
+    ctx.restore();
 
-    // 5. Landmarks & Buildings
+    // 2. Paved roads with shoulders and restrained lane markings
+    ctx.lineCap = 'round';
+    ctx.lineJoin = 'round';
+    ctx.strokeStyle = 'rgba(215, 202, 158, 0.82)';
+    ctx.lineWidth = 38;
+    ctx.beginPath();
+    ctx.moveTo(300, 1195);
+    ctx.bezierCurveTo(850, 1165, 1040, 1220, 1500, 1195);
+    ctx.bezierCurveTo(2040, 1160, 2470, 1225, 2900, 1185);
+    ctx.moveTo(1500, 350);
+    ctx.bezierCurveTo(1470, 760, 1530, 930, 1500, 1195);
+    ctx.bezierCurveTo(1470, 1510, 1540, 1760, 1500, 2030);
+    ctx.moveTo(790, 650);
+    ctx.bezierCurveTo(850, 850, 760, 1010, 790, 1180);
+    ctx.stroke();
+    ctx.strokeStyle = '#777b67';
+    ctx.lineWidth = 26;
+    ctx.stroke();
+    ctx.strokeStyle = 'rgba(239, 222, 163, 0.78)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([14, 16]);
+    ctx.beginPath();
+    ctx.moveTo(300, 1195);
+    ctx.bezierCurveTo(850, 1165, 1040, 1220, 1500, 1195);
+    ctx.bezierCurveTo(2040, 1160, 2470, 1225, 2900, 1185);
+    ctx.moveTo(1500, 350);
+    ctx.bezierCurveTo(1470, 760, 1530, 930, 1500, 1195);
+    ctx.bezierCurveTo(1470, 1510, 1540, 1760, 1500, 2030);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    ctx.lineCap = 'butt';
+
+    // 5. Landmarks & Buildings (with level of detail)
     LANDMARKS.forEach((lm) => {
+      if (showPins) {
+        // Zoomed far out: Google Maps style pin + label, constant screen size
+        ctx.save();
+        ctx.translate(lm.x, lm.y);
+        ctx.scale(1 / zoom, 1 / zoom);
+        ctx.fillStyle = lm.color;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 2.5;
+        ctx.beginPath();
+        ctx.arc(0, 0, 9, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.stroke();
+        ctx.font = 'bold 11px system-ui, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.55)';
+        ctx.strokeText(lm.name, 0, 24);
+        ctx.fillStyle = '#ffffff';
+        ctx.fillText(lm.name, 0, 24);
+        ctx.restore();
+        return;
+      }
+
       // Glow under building
       ctx.fillStyle = `${lm.color}15`;
       ctx.fillRect(lm.x - lm.width / 2 - 10, lm.y - lm.height / 2 - 10, lm.width + 20, lm.height + 20);
@@ -554,21 +909,41 @@ export default function VirtualWorldPage() {
       ctx.fillStyle = `${lm.color}`;
       ctx.fillRect(lm.x - 18, lm.y + lm.height / 2 - 20, 36, 20);
 
-      // Building Name Tag
+      // Name tag + zone badge (scaled up when zoomed out so they stay readable)
+      ctx.save();
+      ctx.translate(lm.x, lm.y - lm.height / 2 - 12);
+      ctx.scale(labelScale, labelScale);
+      ctx.textAlign = 'center';
       ctx.fillStyle = '#ffffff';
       ctx.font = 'bold 13px system-ui, sans-serif';
-      ctx.textAlign = 'center';
-      ctx.fillText(lm.name, lm.x, lm.y - lm.height / 2 - 12);
-
-      // Zone category badge
+      ctx.fillText(lm.name, 0, 0);
       ctx.fillStyle = lm.color;
       ctx.font = '10px monospace';
-      ctx.fillText(`[ ${lm.badge} ]`, lm.x, lm.y - lm.height / 2 - 28);
+      ctx.fillText(`[ ${lm.badge} ]`, 0, -16);
+      ctx.restore();
     });
+
+    // Region labels (Google Earth style place names) fade in as you zoom out
+    const regionAlpha = Math.max(0, Math.min(1, (0.9 - zoom) / 0.3));
+    if (regionAlpha > 0) {
+      REGION_LABELS.forEach((region) => {
+        ctx.save();
+        ctx.translate(region.x, region.y);
+        ctx.scale(1 / zoom, 1 / zoom);
+        ctx.globalAlpha = regionAlpha;
+        ctx.textAlign = 'center';
+        ctx.font = 'bold 15px system-ui, sans-serif';
+        ctx.lineWidth = 4;
+        ctx.strokeStyle = 'rgba(0, 0, 0, 0.45)';
+        ctx.strokeText(region.text, 0, 0);
+        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
+        ctx.fillText(region.text, 0, 0);
+        ctx.restore();
+      });
+    }
 
     // 6. Proximity Wave Rings between player and nearby dev
     if (nearbyDev) {
-      const dist = Math.hypot(playerX - nearbyDev.x, playerY - nearbyDev.y);
       const pulseRadius = 35 + (Date.now() % 1000) / 25;
 
       ctx.strokeStyle = '#10b981';
@@ -605,7 +980,8 @@ export default function VirtualWorldPage() {
         false,
         dev.name,
         dev.developerLevel,
-        dev.speechBubble
+        dev.speechBubble,
+        zoom
       );
     });
 
@@ -620,10 +996,25 @@ export default function VirtualWorldPage() {
       true,
       `${currentUser.name} (You)`,
       '#1 Architect',
-      playerSpeech
+      playerSpeech,
+      zoom
     );
 
     ctx.restore();
+
+    // Soft vignette in screen space for depth
+    const vignette = ctx.createRadialGradient(
+      width / 2,
+      height / 2,
+      Math.min(width, height) * 0.35,
+      width / 2,
+      height / 2,
+      Math.max(width, height) * 0.75
+    );
+    vignette.addColorStop(0, 'rgba(0, 0, 0, 0)');
+    vignette.addColorStop(1, 'rgba(2, 6, 16, 0.45)');
+    ctx.fillStyle = vignette;
+    ctx.fillRect(0, 0, width, height);
   }, [
     playerX,
     playerY,
@@ -646,8 +1037,32 @@ export default function VirtualWorldPage() {
     isSelf: boolean,
     name: string,
     badgeText?: string,
-    speech?: string | null
+    speech?: string | null,
+    zoom: number = 1
   ) => {
+    // Zoomed far out: show a compact map marker instead of the full character
+    if (zoom < 0.5) {
+      ctx.save();
+      ctx.translate(x, y);
+      ctx.scale(1 / zoom, 1 / zoom);
+      ctx.fillStyle = color;
+      ctx.strokeStyle = isSelf ? '#ffffff' : 'rgba(255, 255, 255, 0.85)';
+      ctx.lineWidth = isSelf ? 3 : 2;
+      ctx.beginPath();
+      ctx.arc(0, 0, isSelf ? 8 : 6, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.stroke();
+      if (isSelf) {
+        ctx.strokeStyle = 'rgba(139, 92, 246, 0.6)';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.arc(0, 0, 14 + ((Date.now() % 1200) / 1200) * 10, 0, Math.PI * 2);
+        ctx.stroke();
+      }
+      ctx.restore();
+      return;
+    }
+
     ctx.save();
     ctx.translate(x, y);
 
@@ -756,31 +1171,135 @@ export default function VirtualWorldPage() {
     ctx.restore();
   };
 
-  // Canvas resize listener
+  // Canvas resize listener (only resizes; the render loop does the drawing)
   useEffect(() => {
     const handleResize = () => {
       const canvas = canvasRef.current;
       if (!canvas) return;
       canvas.width = canvas.parentElement?.clientWidth || 1200;
       canvas.height = canvas.parentElement?.clientHeight || 750;
-      renderWorld();
     };
 
     handleResize();
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
-  }, [renderWorld]);
+  }, []);
 
-  // Keep rendering loop active
+  // Keep rendering loop active (also animates zoom smoothly)
   useEffect(() => {
     let animId: number;
     const loop = () => {
+      const canvas = canvasRef.current;
+      if (canvas) {
+        // Keep the target valid if the window was resized
+        zoomTargetRef.current = clampZoom(zoomTargetRef.current);
+
+        // Smooth (exponential) zoom animation
+        const ratio = zoomTargetRef.current / zoomRef.current;
+        if (Math.abs(Math.log(ratio)) > 0.002) {
+          zoomRef.current *= Math.pow(ratio, 0.2);
+        } else {
+          zoomRef.current = zoomTargetRef.current;
+        }
+
+        // Keep the world point under the cursor fixed while zooming (free camera only)
+        const anchor = zoomAnchorRef.current;
+        const cam = cameraRef.current;
+        if (anchor && !cam.follow) {
+          cam.x = anchor.wx - (anchor.sx - canvas.width / 2) / zoomRef.current;
+          cam.y = anchor.wy - (anchor.sy - canvas.height / 2) / zoomRef.current;
+          if (zoomRef.current === zoomTargetRef.current) {
+            zoomAnchorRef.current = null;
+          }
+        }
+      }
+
       renderWorld();
       animId = requestAnimationFrame(loop);
     };
     animId = requestAnimationFrame(loop);
     return () => cancelAnimationFrame(animId);
-  }, [renderWorld]);
+  }, [renderWorld, clampZoom]);
+
+  // ============================================================
+  // POINTER HANDLERS: drag to pan, pinch to zoom, double-click to zoom in
+  // ============================================================
+  const handlePointerDown = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = e.currentTarget;
+    canvas.setPointerCapture(e.pointerId);
+    const rect = canvas.getBoundingClientRect();
+    pointersRef.current.set(e.pointerId, { x: e.clientX - rect.left, y: e.clientY - rect.top });
+
+    if (pointersRef.current.size === 1) {
+      dragRef.current = {
+        sx: e.clientX,
+        sy: e.clientY,
+        camX: cameraRef.current.x,
+        camY: cameraRef.current.y,
+        moved: false,
+      };
+    } else if (pointersRef.current.size === 2) {
+      const [a, b] = Array.from(pointersRef.current.values());
+      pinchRef.current = { dist: Math.hypot(a.x - b.x, a.y - b.y) || 1, zoom: zoomTargetRef.current };
+      dragRef.current = null;
+    }
+  };
+
+  const handlePointerMove = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    const canvas = e.currentTarget;
+    const rect = canvas.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const cam = cameraRef.current;
+    const z = zoomRef.current;
+
+    // Live coordinates under the cursor
+    setCursorCoords(
+      formatWorldCoordinates(cam.x + (mx - canvas.width / 2) / z, cam.y + (my - canvas.height / 2) / z)
+    );
+
+    if (!pointersRef.current.has(e.pointerId)) return;
+    pointersRef.current.set(e.pointerId, { x: mx, y: my });
+
+    // Two fingers: pinch zoom
+    if (pointersRef.current.size === 2 && pinchRef.current) {
+      const [a, b] = Array.from(pointersRef.current.values());
+      const dist = Math.hypot(a.x - b.x, a.y - b.y);
+      setZoom((pinchRef.current.zoom * dist) / pinchRef.current.dist, {
+        sx: (a.x + b.x) / 2,
+        sy: (a.y + b.y) / 2,
+      });
+      return;
+    }
+
+    // One pointer: drag to pan
+    const drag = dragRef.current;
+    if (!drag) return;
+    const dx = e.clientX - drag.sx;
+    const dy = e.clientY - drag.sy;
+    if (!drag.moved && Math.hypot(dx, dy) < 4) return;
+
+    if (!drag.moved) {
+      drag.moved = true;
+      if (cam.follow) {
+        cam.follow = false;
+        setIsFollowing(false);
+      }
+    }
+    cam.x = Math.max(-300, Math.min(WORLD_WIDTH + 300, drag.camX - dx / z));
+    cam.y = Math.max(-300, Math.min(WORLD_HEIGHT + 300, drag.camY - dy / z));
+  };
+
+  const handlePointerUp = (e: React.PointerEvent<HTMLCanvasElement>) => {
+    pointersRef.current.delete(e.pointerId);
+    if (pointersRef.current.size < 2) pinchRef.current = null;
+    if (pointersRef.current.size === 0) dragRef.current = null;
+  };
+
+  const handleDoubleClick = (e: React.MouseEvent<HTMLCanvasElement>) => {
+    const rect = e.currentTarget.getBoundingClientRect();
+    zoomBy(1.8, { sx: e.clientX - rect.left, sy: e.clientY - rect.top });
+  };
 
   // Connect request trigger
   const handleInitiateConnect = (type: 'VOICE' | 'VIDEO' | 'PAIR') => {
@@ -813,6 +1332,9 @@ export default function VirtualWorldPage() {
   const handleTeleport = (x: number, y: number, name: string) => {
     setPlayerX(x);
     setPlayerY(y + 60);
+    // Camera glides to the new spot
+    cameraRef.current.follow = true;
+    setIsFollowing(true);
     toast.info(`Teleported to ${name}!`);
   };
 
@@ -821,6 +1343,13 @@ export default function VirtualWorldPage() {
     const s = secs % 60;
     return `${mins.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`;
   };
+
+  // Scale bar + "eye altitude" readouts (Google Earth style)
+  const pxPerKm = zoomLevel / KM_PER_UNIT;
+  const scaleKmOptions = [100, 200, 500, 1000, 2000, 5000, 10000];
+  const scaleKm = [...scaleKmOptions].reverse().find((k) => k * pxPerKm <= 120) ?? scaleKmOptions[0];
+  const scaleBarWidth = Math.max(24, scaleKm * pxPerKm);
+  const eyeAltitudeKm = Math.round(5000 / zoomLevel);
 
   return (
     <MainLayout>
@@ -841,7 +1370,7 @@ export default function VirtualWorldPage() {
                   </Badge>
                 </div>
                 <p className="text-xs text-muted-foreground">
-                  Explore mountains, plains, roads, and hacker cabins. Walk up to fellow engineers to connect via voice, video, or pair coding.
+                  Scroll to zoom, drag to explore the map. Walk up to fellow engineers to connect via voice, video, or pair coding.
                 </p>
               </div>
             </div>
@@ -871,7 +1400,16 @@ export default function VirtualWorldPage() {
           {/* MAIN VIRTUAL WORLD VIEWPORT */}
           <div className="relative w-full h-[76vh] min-h-[580px] rounded-2xl overflow-hidden border border-border/70 shadow-2xl bg-slate-950">
             {/* The HTML5 Canvas */}
-            <canvas ref={canvasRef} className="w-full h-full block cursor-crosshair" />
+            <canvas
+              ref={canvasRef}
+              className="w-full h-full block cursor-grab active:cursor-grabbing touch-none"
+              onPointerDown={handlePointerDown}
+              onPointerMove={handlePointerMove}
+              onPointerUp={handlePointerUp}
+              onPointerCancel={handlePointerUp}
+              onPointerLeave={() => setCursorCoords('')}
+              onDoubleClick={handleDoubleClick}
+            />
 
             {/* NEARBY PROXIMITY ALERT BANNER */}
             {nearbyDev && (
@@ -1085,6 +1623,72 @@ export default function VirtualWorldPage() {
               </div>
             )}
 
+            {/* ZOOM CONTROLS (Google Maps style, above the radar) */}
+            <div className="absolute right-4 bottom-[216px] z-20 flex flex-col items-center gap-2">
+              {!isFollowing && (
+                <Button
+                  variant="outline"
+                  size="icon"
+                  className="h-9 w-9 rounded-xl bg-card/90 backdrop-blur-md shadow-lg"
+                  onClick={handleRecenter}
+                  title="Recenter on my character"
+                >
+                  <LocateFixed className="h-4 w-4 text-primary" />
+                </Button>
+              )}
+
+              <div className="flex flex-col items-center rounded-xl bg-card/90 border border-border/80 backdrop-blur-md shadow-lg overflow-hidden">
+                <button
+                  type="button"
+                  onClick={handleFitWorld}
+                  className="h-9 w-9 flex items-center justify-center hover:bg-accent transition-colors"
+                  title="View the whole world"
+                >
+                  <Globe className="h-4 w-4 text-emerald-400" />
+                </button>
+                <button
+                  type="button"
+                  onClick={handleResetView}
+                  className="h-9 w-9 flex items-center justify-center border-t border-border/60 hover:bg-accent transition-colors"
+                  title="Reset view (0)"
+                >
+                  <Home className="h-4 w-4" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => zoomBy(ZOOM_STEP)}
+                  className="h-9 w-9 flex items-center justify-center border-t border-border/60 hover:bg-accent transition-colors"
+                  title="Zoom in (+)"
+                >
+                  <Plus className="h-4 w-4" />
+                </button>
+                <div className="w-full text-center text-[10px] font-mono font-bold text-muted-foreground border-t border-border/60 py-1">
+                  {Math.round(zoomLevel * 100)}%
+                </div>
+                <button
+                  type="button"
+                  onClick={() => zoomBy(1 / ZOOM_STEP)}
+                  className="h-9 w-9 flex items-center justify-center border-t border-border/60 hover:bg-accent transition-colors"
+                  title="Zoom out (-)"
+                >
+                  <Minus className="h-4 w-4" />
+                </button>
+              </div>
+            </div>
+
+            {/* COORDINATES / ALTITUDE / SCALE BAR (bottom-center, Google Earth style) */}
+            <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-10 hidden xl:flex items-center gap-4 px-4 py-2 rounded-xl bg-black/55 backdrop-blur-md border border-white/10 text-[11px] font-mono text-white/85 pointer-events-none">
+              <span className="min-w-[150px]">{cursorCoords || formatWorldCoordinates(cameraRef.current.x, cameraRef.current.y)}</span>
+              <span className="text-white/60">Eye alt {eyeAltitudeKm.toLocaleString('en-US')} km</span>
+              <div className="flex flex-col items-start gap-0.5">
+                <div
+                  className="h-1.5 border-x-2 border-b-2 border-white/90"
+                  style={{ width: `${scaleBarWidth}px` }}
+                />
+                <span className="text-[10px] text-white/70">{scaleKm.toLocaleString('en-US')} km</span>
+              </div>
+            </div>
+
             {/* FAST TRAVEL TELEPORT BAR (Top-Left) */}
             <div className="absolute top-4 left-4 z-20 hidden md:flex items-center gap-1.5 p-1.5 rounded-xl bg-card/85 border border-border/70 backdrop-blur-md shadow-lg text-xs">
               <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground px-2">
@@ -1178,6 +1782,14 @@ export default function VirtualWorldPage() {
                 <div className="p-2 rounded bg-background/50 flex justify-between">
                   <span>Wave / Emote:</span>
                   <span className="font-mono font-bold text-amber-400">Spacebar</span>
+                </div>
+                <div className="p-2 rounded bg-background/50 flex justify-between">
+                  <span>Zoom:</span>
+                  <span className="font-mono font-bold text-foreground">Scroll / + −</span>
+                </div>
+                <div className="p-2 rounded bg-background/50 flex justify-between">
+                  <span>Pan / Reset:</span>
+                  <span className="font-mono font-bold text-foreground">Drag / 0</span>
                 </div>
               </div>
             </Card>
