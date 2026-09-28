@@ -13,6 +13,7 @@ export const ROUTES = {
   PROFILE: '/profile',
   SETTINGS: '/settings',
   SEARCH: '/search',
+  VIRTUAL_WORLD: '/world',
   LOGIN: '/auth/login',
   REGISTER: '/auth/register',
   FORGOT_PASSWORD: '/auth/forgot-password',

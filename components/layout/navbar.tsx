@@ -2,7 +2,7 @@
 
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { Search, Bell, MessageSquare, Plus, User, Settings, LogOut, Menu } from 'lucide-react';
+import { Search, Bell, MessageSquare, Plus, User, Settings, LogOut, Menu, Globe } from 'lucide-react';
 import { Button } from '@/components/ui/button';
 import { Input } from '@/components/ui/input';
 import { Avatar, AvatarImage, AvatarFallback } from '@/components/ui/avatar';
@@ -86,7 +86,19 @@ export function Navbar() {
         </form>
 
         {/* Right Actions - Fixed Width */}
-        <div className="flex items-center gap-2 flex-shrink-0">
+        <div className="flex items-center gap-2.5 flex-shrink-0">
+          <Button
+            size="sm"
+            className="hidden sm:inline-flex items-center gap-1.5 bg-gradient-to-r from-emerald-500 via-primary to-purple-600 hover:opacity-90 text-white font-semibold text-xs h-8 px-3 shadow-md shadow-primary/20 border-0"
+            asChild
+          >
+            <Link href="/world">
+              <Globe className="h-3.5 w-3.5 animate-spin-slow" />
+              <span>Virtual World</span>
+              <span className="h-1.5 w-1.5 rounded-full bg-emerald-300 animate-pulse ml-0.5" />
+            </Link>
+          </Button>
+
           <Button variant="ghost" size="icon" className="relative" asChild>
             <Link href={ROUTES.NOTIFICATIONS}>
               <Bell className="h-5 w-5" />
